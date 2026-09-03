@@ -9,6 +9,7 @@
     "start": "electron .",
     "build:mac": "electron-builder --mac",
     "build:dmg": "electron-builder --mac dmg",
+    "build:win": "electron-builder --win",
     "pack": "electron-builder --dir"
   },
   "keywords": [
