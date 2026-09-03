@@ -82,11 +82,16 @@ function saveWindowState() {
 }
 
 // 3. Supervisor Process Management
+let isRestarting = false;
+let restartAttempts = 0;
+let lastStderr = '';
+
 function startDshBackend() {
   const { nodeBin, dshBin } = resolveExecutables();
   console.log(`[DSH Supervisor] Launching backend: ${nodeBin} ${dshBin} web --port 0 --no-open`);
 
   stdoutBuffer = '';
+  lastStderr = '';
 
   // Launch DSH 0.1.2-alpha.3 with dynamic port 0 and no browser popups
   dshChildProcess = spawn(nodeBin, [dshBin, 'web', '--port', '0', '--no-open'], {
@@ -94,12 +99,16 @@ function startDshBackend() {
     env: {
       ...process.env,
       DSH_HOME,
+      DSH_RESTART: 'exit', // Inform dsh-restart and supervisor-aware plugins to exit cleanly
       PATH: process.env.PATH || ''
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
-  dshChildProcess.stdout.on('data', (chunk) => {
+  const currentProcess = dshChildProcess;
+  const launchTime = Date.now();
+
+  currentProcess.stdout.on('data', (chunk) => {
     const text = chunk.toString();
     process.stdout.write(`[DSH stdout] ${text}`);
 
@@ -113,6 +122,7 @@ function startDshBackend() {
       const match = cleanLine.match(/dsh web:\s*(https?:\/\/(?:127\.0\.0\.1|localhost):\d+\/\?token=[^\s()]+)/);
       if (match) {
         currentReadyUrl = match[1];
+        restartAttempts = 0; // Successfully ready, reset crash attempts
         console.log(`[DSH Supervisor] Ready URL detected: ${currentReadyUrl}`);
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.loadURL(currentReadyUrl);
@@ -121,16 +131,68 @@ function startDshBackend() {
     }
   });
 
-  dshChildProcess.stderr.on('data', (chunk) => {
-    process.stderr.write(`[DSH stderr] ${chunk.toString()}`);
+  currentProcess.stderr.on('data', (chunk) => {
+    const text = chunk.toString();
+    process.stderr.write(`[DSH stderr] ${text}`);
+    lastStderr = (lastStderr + text).slice(-2000);
   });
 
-  dshChildProcess.on('exit', (code, signal) => {
+  currentProcess.on('exit', (code, signal) => {
     console.log(`[DSH Supervisor] Backend exited with code: ${code}, signal: ${signal}`);
-    dshChildProcess = null;
-    if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) {
+    if (dshChildProcess === currentProcess) {
+      dshChildProcess = null;
+    }
+
+    if (isQuitting) return;
+    if (isRestarting) return;
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.loadFile(path.join(__dirname, 'loading.html'));
     }
+
+    // Auto-restart with crash loop protection
+    const uptime = Date.now() - launchTime;
+    if (uptime < 3000) {
+      restartAttempts++;
+    } else {
+      restartAttempts = 1;
+    }
+
+    if (restartAttempts > 5) {
+      console.error('[DSH Supervisor] Backend crashed repeatedly. Aborting auto-restart.');
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const errorHtml = `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <title>DeepSeek Harness - 启动失败</title>
+            <style>
+              body { background: #14171c; color: #f0f6fc; font-family: -apple-system, sans-serif; padding: 40px; }
+              h1 { color: #f85149; font-size: 20px; margin-bottom: 12px; }
+              pre { background: #0d1117; padding: 16px; border-radius: 8px; overflow: auto; color: #ff7b72; font-size: 13px; max-height: 400px; }
+              button { margin-top: 16px; padding: 8px 16px; border-radius: 6px; background: #238636; color: white; border: none; cursor: pointer; font-size: 14px; }
+            </style>
+          </head>
+          <body>
+            <h1>DSH 核心服务连续退出异常</h1>
+            <p style="color: #8b949e; margin-bottom: 12px;">后端进程频繁在启动后立即崩溃，最近输出错误：</p>
+            <pre>${lastStderr || '进程退出 code: ' + code + ', signal: ' + signal}</pre>
+            <button onclick="location.reload()">重新尝试启动</button>
+          </body>
+          </html>
+        `;
+        mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml)}`);
+      }
+      return;
+    }
+
+    console.log(`[DSH Supervisor] Auto-restarting backend in 400ms (attempt ${restartAttempts})...`);
+    setTimeout(() => {
+      if (!isQuitting && !dshChildProcess) {
+        startDshBackend();
+      }
+    }, 400);
   });
 }
 
@@ -163,10 +225,12 @@ async function stopDshBackend() {
 
 async function restartDshBackend() {
   console.log('[DSH Supervisor] Restarting backend requested...');
+  isRestarting = true;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadFile(path.join(__dirname, 'loading.html'));
   }
   await stopDshBackend();
+  isRestarting = false;
   startDshBackend();
 }
 
