@@ -1,0 +1,29 @@
+{
+  "name": "dsh-desktop",
+  "productName": "DeepSeek Harness",
+  "version": "0.1.2",
+  "description": "DeepSeek Harness (DSH) 0.1.2-alpha.3 Desktop Shell",
+  "main": "src/main.js",
+  "type": "module",
+  "scripts": {
+    "start": "electron .",
+    "build:mac": "electron-builder --mac",
+    "build:dmg": "electron-builder --mac dmg",
+    "pack": "electron-builder --dir"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "electron"
+  ],
+  "author": "qin",
+  "license": "MIT",
+  "dependencies": {
+    "fix-path": "^4.0.0"
+  },
+  "devDependencies": {
+    "electron": "^34.3.0",
+    "electron-builder": "^25.1.8"
+  }
+}

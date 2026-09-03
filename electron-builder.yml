@@ -1,0 +1,28 @@
+appId: com.deepseek.harness.desktop
+productName: DeepSeek Harness
+directories:
+  output: dist
+  buildResources: build
+files:
+  - "src/**/*"
+  - "package.json"
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+  icon: build/icon.icns
+  hardenedRuntime: false
+  gatekeeperAssess: false
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
