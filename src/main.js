@@ -88,11 +88,14 @@ let lastStderr = '';
 
 async function navigateToDsh(url) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  console.log(`[DSH Supervisor] Navigating to DSH with fresh cache: ${url}`);
+  console.log(`[DSH Supervisor] Navigating to DSH: ${url}`);
   try {
-    await session.defaultSession.clearCache();
+    // Clear dead cookies and cache from prior dynamic ports to prevent HTTP 431 header overflow
+    await session.defaultSession.clearStorageData({
+      storages: ['cookies', 'cache']
+    });
   } catch (err) {
-    console.warn('[DSH Supervisor] Cache clear warning:', err.message);
+    console.warn('[DSH Supervisor] Storage cleanup warning:', err.message);
   }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(url);
@@ -106,8 +109,14 @@ function startDshBackend() {
   stdoutBuffer = '';
   lastStderr = '';
 
-  // Launch DSH 0.1.2-alpha.3 with dynamic port 0 and no browser popups
-  dshChildProcess = spawn(nodeBin, [dshBin, 'web', '--port', '0', '--no-open'], {
+  // Launch DSH 0.1.2-alpha.3 with dynamic port 0, expanded 1MB header size limit, and no browser popups
+  dshChildProcess = spawn(nodeBin, [
+    '--max-http-header-size=1048576',
+    dshBin,
+    'web',
+    '--port', '0',
+    '--no-open'
+  ], {
     cwd: app.getPath('home'),
     env: {
       ...process.env,
@@ -550,6 +559,16 @@ function setupTray() {
 
 // 7. Network Cache Control & Diagnostic Interceptor
 function setupNetworkInterceptors() {
+  // Strip redundant Cookie header on static bundle and asset requests to prevent HTTP 431 header overflow
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    const requestHeaders = { ...details.requestHeaders };
+    if (details.url.includes('/plugins/??') || details.url.includes('/assets/')) {
+      delete requestHeaders['Cookie'];
+      delete requestHeaders['cookie'];
+    }
+    callback({ requestHeaders });
+  });
+
   // Prevent aggressive caching of root HTML documents so window.__DSH_BOOT__ revision is always fresh
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders };
