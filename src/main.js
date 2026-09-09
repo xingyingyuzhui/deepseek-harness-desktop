@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Tray, shell, dialog } from 'electron';
+import { app, BrowserWindow, Menu, Tray, shell, dialog, session } from 'electron';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -86,6 +86,19 @@ let isRestarting = false;
 let restartAttempts = 0;
 let lastStderr = '';
 
+async function navigateToDsh(url) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  console.log(`[DSH Supervisor] Navigating to DSH with fresh cache: ${url}`);
+  try {
+    await session.defaultSession.clearCache();
+  } catch (err) {
+    console.warn('[DSH Supervisor] Cache clear warning:', err.message);
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.loadURL(url);
+  }
+}
+
 function startDshBackend() {
   const { nodeBin, dshBin } = resolveExecutables();
   console.log(`[DSH Supervisor] Launching backend: ${nodeBin} ${dshBin} web --port 0 --no-open`);
@@ -124,9 +137,7 @@ function startDshBackend() {
         currentReadyUrl = match[1];
         restartAttempts = 0; // Successfully ready, reset crash attempts
         console.log(`[DSH Supervisor] Ready URL detected: ${currentReadyUrl}`);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.loadURL(currentReadyUrl);
-        }
+        navigateToDsh(currentReadyUrl);
       }
     }
   });
@@ -328,11 +339,22 @@ function createMainWindow() {
     });
   }
 
+  // Log renderer console messages and load failures for supervisor diagnostics
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    if (level >= 2) {
+      console.warn(`[Renderer ${level === 3 ? 'ERROR' : 'WARN'}] ${message} (${sourceId}:${line})`);
+    }
+  });
+
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[Renderer did-fail-load] Code ${errorCode}: ${errorDescription} on ${validatedURL}`);
+  });
+
   // Load splash screen first
   mainWindow.loadFile(path.join(__dirname, 'loading.html'));
 
   if (currentReadyUrl) {
-    mainWindow.loadURL(currentReadyUrl);
+    navigateToDsh(currentReadyUrl);
   }
 
   // Handle external link clicks
@@ -389,18 +411,32 @@ function setupApplicationMenu() {
       label: '核心管控',
       submenu: [
         {
-          label: '重启 DSH 核心 (优雅重载)',
-          accelerator: 'CmdOrCtrl+Shift+R',
+          label: '重启 DSH 核心 (服务重载)',
+          accelerator: 'CmdOrCtrl+Alt+R',
           click: () => restartDshBackend()
         },
         {
-          label: '刷新界面',
+          label: '刷新界面 (忽略缓存)',
           accelerator: 'CmdOrCtrl+R',
           click: () => {
-            if (currentReadyUrl && mainWindow) {
-              mainWindow.loadURL(currentReadyUrl);
-            } else if (mainWindow) {
-              mainWindow.reload();
+            if (mainWindow) {
+              mainWindow.webContents.reloadIgnoringCache();
+            }
+          }
+        },
+        {
+          label: '清空缓存并强制重载',
+          accelerator: 'CmdOrCtrl+Shift+R',
+          click: async () => {
+            if (mainWindow) {
+              try {
+                await session.defaultSession.clearCache();
+              } catch (_) {}
+              if (currentReadyUrl) {
+                navigateToDsh(currentReadyUrl);
+              } else {
+                mainWindow.webContents.reloadIgnoringCache();
+              }
             }
           }
         },
@@ -512,7 +548,31 @@ function setupTray() {
   }
 }
 
-// 7. App Lifecycle
+// 7. Network Cache Control & Diagnostic Interceptor
+function setupNetworkInterceptors() {
+  // Prevent aggressive caching of root HTML documents so window.__DSH_BOOT__ revision is always fresh
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const responseHeaders = { ...details.responseHeaders };
+    try {
+      const u = new URL(details.url);
+      if (u.pathname === '/' || u.pathname.endsWith('.html')) {
+        responseHeaders['Cache-Control'] = ['no-cache, no-store, must-revalidate'];
+        responseHeaders['Pragma'] = ['no-cache'];
+        responseHeaders['Expires'] = ['0'];
+      }
+    } catch (_) {}
+    callback({ responseHeaders });
+  });
+
+  // Log network 4xx/5xx errors
+  session.defaultSession.webRequest.onResponseStarted((details) => {
+    if (details.statusCode >= 400) {
+      console.warn(`[DSH Network ${details.statusCode}] ${details.method} ${details.url}`);
+    }
+  });
+}
+
+// 8. App Lifecycle
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
@@ -526,6 +586,7 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    setupNetworkInterceptors();
     setupApplicationMenu();
     createMainWindow();
     setupTray();

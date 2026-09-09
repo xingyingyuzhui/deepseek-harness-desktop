@@ -6,6 +6,63 @@ contextBridge.exposeInMainWorld('deepseekDesktop', {
   isDesktop: true
 });
 
+// Inject auto-healing bundle transport into the main world to recover from any stale combo URL revisions
+try {
+  const scriptEl = document.createElement('script');
+  scriptEl.textContent = `
+    (() => {
+      const defaultLoad = (url) => new Promise((resolve, reject) => {
+        const el = document.createElement("script");
+        el.async = true;
+        el.src = url;
+        el.addEventListener("load", () => {
+          el.remove();
+          resolve();
+        }, { once: true });
+        el.addEventListener("error", () => {
+          el.remove();
+          reject(new Error("bundle script " + url + " failed to load"));
+        }, { once: true });
+        document.head.append(el);
+      });
+
+      window.__DSH_TRANSPORT__ = {
+        loadBundle: async (url) => {
+          try {
+            await defaultLoad(url);
+          } catch (err) {
+            console.warn("[DSH Desktop] Bundle script load failed, checking for revised batch URL:", url);
+            try {
+              const res = await fetch("/", { cache: "no-store" });
+              const html = await res.text();
+              const marker = 'globalThis["__DSH_BOOT__"] = ';
+              const start = html.indexOf(marker);
+              if (start !== -1) {
+                const end = html.indexOf("</script>", start);
+                if (end !== -1) {
+                  const boot = JSON.parse(html.slice(start + marker.length, end));
+                  const batch = boot.batches?.find(b => b.url !== url && (url.includes(b.entries?.[0]) || b.entries?.some(e => url.includes(e))));
+                  if (batch && batch.url) {
+                    console.log("[DSH Desktop] Auto-recovered updated bundle URL:", batch.url);
+                    await defaultLoad(batch.url);
+                    return;
+                  }
+                }
+              }
+            } catch (recoveryErr) {
+              console.error("[DSH Desktop] Auto-recovery failed:", recoveryErr);
+            }
+            throw err;
+          }
+        }
+      };
+    })();
+  `;
+  (document.head || document.documentElement).appendChild(scriptEl);
+  scriptEl.remove();
+} catch (_) {}
+
+
 if (process.platform === 'darwin') {
   const css = `
     /* DeepSeek Desktop: macOS Traffic Light Safe Inset */
